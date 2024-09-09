@@ -9,7 +9,6 @@ use time::format_description::well_known::Rfc3339;
 use tracing::{Event, Id, Metadata, Subscriber};
 use tracing_core::metadata::Level;
 use tracing_core::span::Attributes;
-use tracing_log::AsLog;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::SpanRef;
@@ -27,17 +26,6 @@ const _SOURCE: &str = "src";
 
 const BUNYAN_REQUIRED_FIELDS: [&str; 7] =
     [BUNYAN_VERSION, LEVEL, NAME, HOSTNAME, PID, TIME, MESSAGE];
-
-/// Convert from log levels to Bunyan's levels.
-fn to_bunyan_level(level: &Level) -> u16 {
-    match level.as_log() {
-        log::Level::Error => 50,
-        log::Level::Warn => 40,
-        log::Level::Info => 30,
-        log::Level::Debug => 20,
-        log::Level::Trace => 10,
-    }
-}
 
 /// This layer is exclusively concerned with formatting information using the [Bunyan format](https://github.com/trentm/node-bunyan).
 /// It relies on the upstream `JsonStorageLayer` to get access to the fields attached to
@@ -164,7 +152,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
         map_serializer.serialize_entry(BUNYAN_VERSION, &self.bunyan_version)?;
         map_serializer.serialize_entry(NAME, &self.name)?;
         map_serializer.serialize_entry(MESSAGE, &message)?;
-        map_serializer.serialize_entry(LEVEL, &to_bunyan_level(level))?;
+        map_serializer.serialize_entry(LEVEL, level.as_str())?;
         map_serializer.serialize_entry(HOSTNAME, &self.hostname)?;
         map_serializer.serialize_entry(PID, &self.pid)?;
         if let Ok(time) = &time::OffsetDateTime::now_utc().format(&Rfc3339) {
