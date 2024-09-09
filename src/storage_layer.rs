@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
@@ -28,6 +29,20 @@ pub struct JsonStorageLayer;
 #[derive(Clone, Debug)]
 pub struct JsonStorage<'a> {
     values: HashMap<&'a str, serde_json::Value>,
+}
+
+impl<'a> Deref for JsonStorage<'a> {
+    type Target = HashMap<&'a str, serde_json::Value>;
+
+    fn deref(&self) -> &Self::Target {
+        self.values()
+    }
+}
+
+impl<'a> DerefMut for JsonStorage<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
 }
 
 impl<'a> JsonStorage<'a> {
