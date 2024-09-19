@@ -6,16 +6,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 use time::format_description::well_known::Rfc3339;
-use tracing::{Event, Id, Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 use tracing_core::metadata::Level;
-use tracing_core::span::Attributes;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::Context;
-use tracing_subscriber::registry::SpanRef;
 use tracing_subscriber::Layer;
 
-/// Keys for core fields of the Bunyan format (https://github.com/trentm/node-bunyan#core-fields)
-const BUNYAN_VERSION: &str = "v";
+/// Keys for core fields of the format (https://github.com/trentm/node-bunyan#core-fields)
 const LEVEL: &str = "level";
 const NAME: &str = "name";
 const HOSTNAME: &str = "hostname";
@@ -24,17 +21,15 @@ const TIME: &str = "time";
 const MESSAGE: &str = "msg";
 const _SOURCE: &str = "src";
 
-const BUNYAN_REQUIRED_FIELDS: [&str; 7] =
-    [BUNYAN_VERSION, LEVEL, NAME, HOSTNAME, PID, TIME, MESSAGE];
+const REQUIRED_FIELDS: [&str; 6] = [LEVEL, NAME, HOSTNAME, PID, TIME, MESSAGE];
 
 /// This layer is exclusively concerned with formatting information using the [Bunyan format](https://github.com/trentm/node-bunyan).
 /// It relies on the upstream `JsonStorageLayer` to get access to the fields attached to
 /// each span.
-pub struct BunyanFormattingLayer<W: for<'a> MakeWriter<'a> + 'static> {
+pub struct FormattingLayer<W: for<'a> MakeWriter<'a> + 'static> {
     make_writer: W,
     pid: u32,
     hostname: String,
-    bunyan_version: u8,
     name: String,
     default_fields: HashMap<String, Value>,
     skip_fields: HashSet<String>,
@@ -57,7 +52,7 @@ impl fmt::Display for SkipFieldError {
 
 impl std::error::Error for SkipFieldError {}
 
-impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
+impl<W: for<'a> MakeWriter<'a> + 'static> FormattingLayer<W> {
     /// Create a new `BunyanFormattingLayer`.
     ///
     /// You have to specify:
@@ -108,7 +103,6 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
             name,
             pid: std::process::id(),
             hostname: gethostname::gethostname().to_string_lossy().into_owned(),
-            bunyan_version: 0,
             default_fields,
             skip_fields: HashSet::new(),
         }
@@ -134,7 +128,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
     {
         for field in fields {
             let field = field.into();
-            if BUNYAN_REQUIRED_FIELDS.contains(&field.as_str()) {
+            if REQUIRED_FIELDS.contains(&field.as_str()) {
                 return Err(SkipFieldError(field));
             }
             self.skip_fields.insert(field);
@@ -149,7 +143,6 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
         message: &str,
         level: &Level,
     ) -> Result<(), std::io::Error> {
-        map_serializer.serialize_entry(BUNYAN_VERSION, &self.bunyan_version)?;
         map_serializer.serialize_entry(NAME, &self.name)?;
         map_serializer.serialize_entry(MESSAGE, &message)?;
         map_serializer.serialize_entry(LEVEL, level.as_str())?;
@@ -175,49 +168,6 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
         }
 
         Ok(())
-    }
-
-    /// Given a span, it serialised it to a in-memory buffer (vector of bytes).
-    fn serialize_span<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>(
-        &self,
-        span: &SpanRef<S>,
-        ty: Type,
-    ) -> Result<Vec<u8>, std::io::Error> {
-        let mut buffer = Vec::new();
-        let mut serializer = serde_json::Serializer::new(&mut buffer);
-        let mut map_serializer = serializer.serialize_map(None)?;
-        let message = format_span_context(span, ty);
-        self.serialize_bunyan_core_fields(&mut map_serializer, &message, span.metadata().level())?;
-        // Additional metadata useful for debugging
-        // They should be nested under `src` (see https://github.com/trentm/node-bunyan#src )
-        // but `tracing` does not support nested values yet
-        self.serialize_field(&mut map_serializer, "target", span.metadata().target())?;
-        self.serialize_field(&mut map_serializer, "line", &span.metadata().line())?;
-        self.serialize_field(&mut map_serializer, "file", &span.metadata().file())?;
-
-        // Add all default fields
-        for (key, value) in self.default_fields.iter() {
-            // Make sure this key isn't reserved. If it is reserved,
-            // silently ignore
-            if !BUNYAN_REQUIRED_FIELDS.contains(&key.as_str()) {
-                self.serialize_field(&mut map_serializer, key, value)?;
-            }
-        }
-
-        let extensions = span.extensions();
-        if let Some(visitor) = extensions.get::<JsonStorage>() {
-            for (key, value) in visitor.values() {
-                // Make sure this key isn't reserved. If it is reserved,
-                // silently ignore
-                if !BUNYAN_REQUIRED_FIELDS.contains(key) {
-                    self.serialize_field(&mut map_serializer, key, value)?;
-                }
-            }
-        }
-        map_serializer.end()?;
-        // We add a trailing new line.
-        buffer.write_all(b"\n")?;
-        Ok(buffer)
     }
 
     /// Given an in-memory buffer holding a complete serialised record, flush it to the writer
@@ -250,28 +200,13 @@ impl fmt::Display for Type {
     }
 }
 
-/// Ensure consistent formatting of the span context.
-///
-/// Example: "[AN_INTERESTING_SPAN - START]"
-fn format_span_context<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>(
-    span: &SpanRef<S>,
-    ty: Type,
-) -> String {
-    format!("[{} - {}]", span.metadata().name().to_uppercase(), ty)
-}
-
 /// Ensure consistent formatting of event message.
 ///
 /// Examples:
-/// - "[AN_INTERESTING_SPAN - EVENT] My event message" (for an event with a parent span)
 /// - "My event message" (for an event without a parent span)
-fn format_event_message<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>(
-    current_span: &Option<SpanRef<S>>,
-    event: &Event,
-    event_visitor: &JsonStorage<'_>,
-) -> String {
+fn format_event_message(event: &Event, event_visitor: &JsonStorage<'_>) -> String {
     // Extract the "message" field, if provided. Fallback to the target, if missing.
-    let mut message = event_visitor
+    event_visitor
         .values()
         .get("message")
         .and_then(|v| match v {
@@ -279,17 +214,10 @@ fn format_event_message<S: Subscriber + for<'a> tracing_subscriber::registry::Lo
             _ => None,
         })
         .unwrap_or_else(|| event.metadata().target())
-        .to_owned();
-
-    // If the event is in the context of a span, prepend the span name to the message.
-    if let Some(span) = &current_span {
-        message = format!("{} {}", format_span_context(span, Type::Event), message);
-    }
-
-    message
+        .to_owned()
 }
 
-impl<S, W> Layer<S> for BunyanFormattingLayer<W>
+impl<S, W> Layer<S> for FormattingLayer<W>
 where
     S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     W: for<'a> MakeWriter<'a> + 'static,
@@ -309,7 +237,7 @@ where
             let mut serializer = serde_json::Serializer::new(&mut buffer);
             let mut map_serializer = serializer.serialize_map(None)?;
 
-            let message = format_event_message(&current_span, event, &event_visitor);
+            let message = format_event_message(event, &event_visitor);
             self.serialize_bunyan_core_fields(
                 &mut map_serializer,
                 &message,
@@ -324,16 +252,21 @@ where
 
             // Add all default fields
             for (key, value) in self.default_fields.iter().filter(|(key, _)| {
-                key.as_str() != "message" && !BUNYAN_REQUIRED_FIELDS.contains(&key.as_str())
+                key.as_str() != "message" && !REQUIRED_FIELDS.contains(&key.as_str())
             }) {
                 self.serialize_field(&mut map_serializer, key, value)?;
+            }
+
+            // If the event is in the context of a span, prepend the span name to the message.
+            if let Some(span) = &current_span {
+                self.serialize_field(&mut map_serializer, "span", span.name())?;
             }
 
             // Add all the other fields associated with the event, expect the message we already used.
             for (key, value) in event_visitor
                 .values()
                 .iter()
-                .filter(|(&key, _)| key != "message" && !BUNYAN_REQUIRED_FIELDS.contains(&key))
+                .filter(|(&key, _)| key != "message" && !REQUIRED_FIELDS.contains(&key))
             {
                 self.serialize_field(&mut map_serializer, key, value)?;
             }
@@ -345,7 +278,7 @@ where
                     for (key, value) in visitor.values() {
                         // Make sure this key isn't reserved. If it is reserved,
                         // silently ignore
-                        if !BUNYAN_REQUIRED_FIELDS.contains(key) {
+                        if !REQUIRED_FIELDS.contains(key) {
                             self.serialize_field(&mut map_serializer, key, value)?;
                         }
                     }
@@ -361,20 +294,6 @@ where
         let result: std::io::Result<Vec<u8>> = format();
         if let Ok(formatted) = result {
             let _ = self.emit(&formatted, event.metadata());
-        }
-    }
-
-    fn on_new_span(&self, _attrs: &Attributes, id: &Id, ctx: Context<'_, S>) {
-        let span = ctx.span(id).expect("Span not found, this is a bug");
-        if let Ok(serialized) = self.serialize_span(&span, Type::EnterSpan) {
-            let _ = self.emit(&serialized, span.metadata());
-        }
-    }
-
-    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
-        let span = ctx.span(&id).expect("Span not found, this is a bug");
-        if let Ok(serialized) = self.serialize_span(&span, Type::ExitSpan) {
-            let _ = self.emit(&serialized, span.metadata());
         }
     }
 }
